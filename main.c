@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <errno.h>
 #include <net80211/ieee80211.h>
 #include <stdio.h>
@@ -29,7 +30,17 @@ typedef struct {
     const char *ifname;
 } if_ctx;
 
-struct ifmediareq *ifmedia_getstate(if_ctx *ctx);
+typedef struct {
+	const char *interface;
+	int connected;
+	char *ssid;
+	char *bssid;
+	int rssi;
+	int channel;
+	uint nr_capinfo;
+	uint nr_rsnprotos;
+	uint nr_rsnakms;
+} lswifi_result;
 
 static void scan_and_wait(if_ctx *ctx) {
     struct ieee80211_scan_req sr;
@@ -79,6 +90,29 @@ static void scan_and_wait(if_ctx *ctx) {
     printf("scan completed\n");
 }
 
+static void mac_to_string(char buf[], const uint8_t mac[6]) {
+    sprintf(buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+}
+
+static void trim_string(char *str) {
+    int start = 0, end = strlen(str) - 1;
+
+    while (isspace(str[start])) {
+        start++;
+    }
+
+    while (end > start && isspace(str[end])) {
+        end--;
+    }
+
+    if (start > 0 || end < (strlen(str) - 1)) {
+        memmove(str, str + start, end - start + 1);
+        str[end - start + 1] = '\0';
+    }
+}
+
 static void getchaninfo(if_ctx *ctx) {
     if (chaninfo != NULL)
         return;
@@ -91,7 +125,6 @@ static void getchaninfo(if_ctx *ctx) {
         fprintf(stderr, "unable to get channel information\n");
         exit(1);
     }
-    global_ifmr = ifmedia_getstate(ctx);
 
     if (gothtconf)
         return;
@@ -121,7 +154,33 @@ static void list_scan(if_ctx *ctx) {
 
     getchaninfo(ctx);
 
-    // TODO: to be continued
+    cp = buf;
+    do {
+        const struct ieee80211req_scan_result *sr;
+        const uint8_t *vp, *idp;
+
+        sr = (const struct ieee80211req_scan_result *)(const void *)cp;
+        vp = cp + sr->isr_ie_off;
+        if (sr->isr_meshid_len) {
+            idp = vp + sr->isr_ssid_len;
+            idlen = sr->isr_meshid_len;
+        } else {
+            idp = vp;
+            idlen = sr->isr_ssid_len;
+        }
+
+        char bssid[24];
+        mac_to_string(bssid, sr->isr_bssid);
+
+        char ssid[IEEE80211_NWID_LEN];
+        sprintf(ssid, "%.*s", idlen, idp);
+
+        int rssi = sr->isr_rssi + sr->isr_noise;
+
+        printf("BSSID: %s, SSID: %s; FREQ: %u; RSSI: %i\n", bssid, ssid, sr->isr_freq, rssi);
+
+        cp += sr->isr_len, len -= sr->isr_len;
+    } while (len >= (int)sizeof(struct ieee80211req_scan_result));
 
     return;
 }
@@ -129,7 +188,7 @@ static void list_scan(if_ctx *ctx) {
 int main() {
     printf("interface: ");
     char ifname[64];
-    scanf("%s", ifname);
+    scanf("%63s", ifname);
 
     printf("starting scan on %s...\n", ifname);
 
@@ -140,6 +199,9 @@ int main() {
     };
 
     scan_and_wait(&ctx);
+    list_scan(&ctx);
+
+    close(io_s);
 
     return 0;
 }
