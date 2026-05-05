@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <errno.h>
 #include <net80211/ieee80211.h>
 #include <stdio.h>
@@ -9,6 +8,7 @@
 
 #include <net/if.h>
 #include <net/route.h>
+#include <ifaddrs.h>
 #include <net80211/ieee80211_freebsd.h>
 #include <net80211/ieee80211_ioctl.h>
 #include <lib80211/lib80211_ioctl.h>
@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 
 #define MAXCHAN 1536
+#define MAXWIFI 1536
 
 static struct ieee80211req_chaninfo *chaninfo;
 
@@ -25,15 +26,15 @@ typedef struct {
 } if_ctx;
 
 typedef struct {
-	const char *interface;
-	int connected;
-	const char bssid[24];
-	const char ssid[IEEE80211_NWID_LEN];
+	char *interface;
+//	int connected;
+	char *bssid;
+	char *ssid;
 	int rssi;
 	int channel;
 } lswifi_result;
 
-static void scan_and_wait(if_ctx *ctx) {
+static int scan_and_wait(if_ctx *ctx) {
     struct ieee80211_scan_req sr;
     struct ieee80211req ireq;
     int sroute;
@@ -41,7 +42,7 @@ static void scan_and_wait(if_ctx *ctx) {
     sroute = socket(PF_ROUTE, SOCK_RAW, 0);
     if (sroute < 0) {
         perror("socket(PF_ROUTE,SOCK_RAW)");
-        return;
+        return -1;
     }
     memset(&ireq, 0, sizeof(ireq));
     strlcpy(ireq.i_name, ctx->ifname, sizeof(ireq.i_name));
@@ -74,11 +75,15 @@ static void scan_and_wait(if_ctx *ctx) {
             ifan = (struct if_announcemsghdr *)rtm;
         } while (rtm->rtm_type != RTM_IEEE80211 ||
             ifan->ifan_what != RTM_IEEE80211_SCAN);
+    } else if (errno == 22) {
+        return errno; // interface is not wifi
     } else {
         perror("ioctl");
+        return errno;
     }
     close(sroute);
     printf("scan completed\n");
+    return 0;
 }
 
 static void mac_to_string(char buf[], const uint8_t mac[6]) {
@@ -108,7 +113,7 @@ static int freq_to_channel(struct ieee80211req_chaninfo *chaninfo, uint16_t freq
     return 0;
 }
 
-static void list_scan(if_ctx *ctx) {
+static void get_scan_results(if_ctx *ctx, lswifi_result **networks, int *networks_idx) {
     uint8_t buf[24*1024];
     char ssid[IEEE80211_NWID_LEN+1];
     const uint8_t *cp;
@@ -138,10 +143,10 @@ static void list_scan(if_ctx *ctx) {
             idlen = sr->isr_ssid_len;
         }
 
-        char bssid[24];
+        char *bssid = malloc(24 * sizeof(char));
         mac_to_string(bssid, sr->isr_bssid);
 
-        char ssid[IEEE80211_NWID_LEN];
+        char *ssid = malloc((IEEE80211_NWID_LEN + 1) * sizeof(char));
         sprintf(ssid, "%.*s", idlen, idp);
 
         int rssi = sr->isr_rssi + sr->isr_noise;
@@ -152,30 +157,73 @@ static void list_scan(if_ctx *ctx) {
 
         printf("BSSID: %s, SSID: %s, CHANNEL: %u, RSSI: %i, CAPINFO: %u\n", bssid, ssid, channel, rssi, sr->isr_capinfo);
 
+        lswifi_result *result = malloc(sizeof(lswifi_result));
+        if (result == NULL) {
+            free(ssid);
+            free(bssid);
+        } else {
+            *result = (lswifi_result){
+                .interface = strdup(ctx->ifname),
+                .ssid = ssid,
+                .bssid = bssid,
+                .rssi = rssi,
+                .channel = channel,
+            };
+
+            networks[*networks_idx] = result;
+            (*networks_idx)++;
+        }
+
         cp += sr->isr_len, len -= sr->isr_len;
     } while (len >= (int)sizeof(struct ieee80211req_scan_result));
 
     return;
 }
 
-int main() {
-    printf("interface: ");
-    char ifname[64];
-    scanf("%63s", ifname);
+lswifi_result **get_networks() {
+    struct ifaddrs *ifap;
+    struct ifaddrs *ifa;
 
-    printf("starting scan on %s...\n", ifname);
-
+    if (getifaddrs(&ifap) != 0) {
+        perror("getifaddrs");
+        return NULL;
+    }
+ 
     int io_s = socket(AF_INET, SOCK_DGRAM, 0);
-    if_ctx ctx = {
-        .ifname = ifname,
-        .io_s = io_s
-    };
+    lswifi_result **networks = malloc(MAXWIFI * sizeof(lswifi_result *));
+    int networks_idx = 0;
 
-    scan_and_wait(&ctx);
-    list_scan(&ctx);
+    for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
+        if_ctx ctx = {
+            .ifname = ifa->ifa_name,
+            .io_s = io_s
+        };
+
+        if (scan_and_wait(&ctx) == 0)
+            get_scan_results(&ctx, networks, &networks_idx); 
+    }
+
+    freeifaddrs(ifap);
+
+    networks[networks_idx] = NULL;
 
     close(io_s);
 
-    return 0;
+    return networks;
 }
 
+void free_networks(lswifi_result **networks) {
+    for (int i = 0; networks[i] != NULL; i++) {
+        free(networks[i]->bssid);
+        free(networks[i]->ssid);
+        free(networks[i]->interface);
+        free(networks[i]);
+    }
+    free(networks);
+}
+
+int main() {
+    lswifi_result **networks = get_networks();
+    free_networks(networks);
+    return 0;
+}
