@@ -18,12 +18,6 @@
 #define MAXCHAN 1536
 
 static struct ieee80211req_chaninfo *chaninfo;
-static struct ifmediareq *global_ifmr;
-
-static int htconf;
-static int gothtconf = 0;
-static int vhtconf = 0;
-static int gotvhtconf = 0;
 
 typedef struct {
     int io_s;
@@ -33,13 +27,10 @@ typedef struct {
 typedef struct {
 	const char *interface;
 	int connected;
-	char *ssid;
-	char *bssid;
+	const char bssid[24];
+	const char ssid[IEEE80211_NWID_LEN];
 	int rssi;
 	int channel;
-	uint nr_capinfo;
-	uint nr_rsnprotos;
-	uint nr_rsnakms;
 } lswifi_result;
 
 static void scan_and_wait(if_ctx *ctx) {
@@ -96,23 +87,6 @@ static void mac_to_string(char buf[], const uint8_t mac[6]) {
     );
 }
 
-static void trim_string(char *str) {
-    int start = 0, end = strlen(str) - 1;
-
-    while (isspace(str[start])) {
-        start++;
-    }
-
-    while (end > start && isspace(str[end])) {
-        end--;
-    }
-
-    if (start > 0 || end < (strlen(str) - 1)) {
-        memmove(str, str + start, end - start + 1);
-        str[end - start + 1] = '\0';
-    }
-}
-
 static void getchaninfo(if_ctx *ctx) {
     if (chaninfo != NULL)
         return;
@@ -125,18 +99,13 @@ static void getchaninfo(if_ctx *ctx) {
         fprintf(stderr, "unable to get channel information\n");
         exit(1);
     }
+}
 
-    if (gothtconf)
-        return;
-    if (lib80211_get80211val(ctx->io_s, ctx->ifname, IEEE80211_IOC_HTCONF, &htconf) < 0)
-        fprintf(stderr, "unable to get HT configuration information\n");
-    gothtconf = 1;
-
-    if (gotvhtconf)
-        return;
-    if (lib80211_get80211val(ctx->io_s, ctx->ifname, IEEE80211_IOC_VHTCONF, &vhtconf) < 0)
-        fprintf(stderr, "unable to get VHT configuration information\n");
-    gotvhtconf = 1;
+static int freq_to_channel(struct ieee80211req_chaninfo *chaninfo, uint16_t freq) {
+    for (int i = 0; i < chaninfo->ic_nchans; i++)
+        if (chaninfo->ic_chans[i].ic_freq == freq)
+            return chaninfo->ic_chans[i].ic_ieee;
+    return 0;
 }
 
 static void list_scan(if_ctx *ctx) {
@@ -146,7 +115,7 @@ static void list_scan(if_ctx *ctx) {
     int len, idlen;
 
     if (lib80211_get80211len(ctx->io_s, ctx->ifname, IEEE80211_IOC_SCAN_RESULTS, buf, sizeof(buf), &len) < 0) {
-        fprintf(stderr, "unable to get scan results");
+        fprintf(stderr, "unable to get scan results\n");
         return; // TODO: more here
     }
     if (len < (int)sizeof(struct ieee80211req_scan_result))
@@ -177,7 +146,11 @@ static void list_scan(if_ctx *ctx) {
 
         int rssi = sr->isr_rssi + sr->isr_noise;
 
-        printf("BSSID: %s, SSID: %s; FREQ: %u; RSSI: %i\n", bssid, ssid, sr->isr_freq, rssi);
+        int channel = freq_to_channel(chaninfo, sr->isr_freq);
+        if (channel == 0)
+            fprintf(stderr, "warning: could not find channel\n");
+
+        printf("BSSID: %s, SSID: %s, CHANNEL: %u, RSSI: %i, CAPINFO: %u\n", bssid, ssid, channel, rssi, sr->isr_capinfo);
 
         cp += sr->isr_len, len -= sr->isr_len;
     } while (len >= (int)sizeof(struct ieee80211req_scan_result));
